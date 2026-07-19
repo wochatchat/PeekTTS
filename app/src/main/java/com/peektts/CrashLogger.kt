@@ -79,6 +79,16 @@ object CrashLogger {
         append("ERROR", tag, message, throwable)
     }
 
+    /**
+     * 主动把内存中所有日志（包括 INFO）立刻持久化到 filesDir/peektts_crash.log。
+     * 用途：在调用 native 可能把进程直接 abort() 的 marker 之前 flush，
+     * 这样 native 一崩进程被杀，前面那个 INFO marker 仍然在磁盘上能看到。
+     */
+    @Synchronized
+    fun flushNow() {
+        persistNow()
+    }
+
     /** 获取全部日志（最早 -> 最新），用于 LogActivity 展示 */
     fun snapshot(): List<Entry> = entries.toList()
 

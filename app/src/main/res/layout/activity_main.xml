@@ -200,5 +200,13 @@
             android:text="查看运行日志 / 崩溃报告"
             android:textSize="14sp" />
 
+        <Button
+            android:id="@+id/btnDiag"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="诊断：同步初始化 (主线程)"
+            android:textSize="14sp" />
+
     </LinearLayout>
 </ScrollView>

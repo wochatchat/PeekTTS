@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvTtsModelDesc: TextView
     private lateinit var switchAutoStart: Switch
     private lateinit var btnOpenLog: Button
+    private lateinit var btnDiag: Button
 
     private val modelManager by lazy { ModelManager(this) }
 
@@ -98,6 +99,7 @@ class MainActivity : AppCompatActivity() {
         tvTtsModelDesc = findViewById(R.id.tvTtsModelDesc)
         switchAutoStart = findViewById(R.id.switchAutoStart)
         btnOpenLog = findViewById(R.id.btnOpenLog)
+        btnDiag = findViewById(R.id.btnDiag)
     }
 
     private fun setupModelSpinners() {
@@ -210,9 +212,99 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, LogActivity::class.java))
         }
 
+        btnDiag.setOnClickListener {
+            // 在子线程跑 native init，防止 ANR。
+            // 一旦 native abort 把整个进程杀掉，主线程也来不及显示 Toast，
+            // 但崩前所有 INFO marker 都已 flush 到磁盘，LogActivity 重启后可读。
+            Toast.makeText(this, "正在子线程同步执行 native init...", Toast.LENGTH_LONG).show()
+            Thread { diagSyncInit() }.start()
+        }
+
         switchAutoStart.setOnCheckedChangeListener { _, isChecked ->
             getSharedPreferences("peektts", MODE_PRIVATE)
                 .edit().putBoolean("auto_start_boot", isChecked).apply()
+        }
+    }
+
+    /**
+     * 同步诊断：在主线程跑一遍 initModels 各步、并把每一步之前的 marker 立即 flush 到磁盘，
+     * 这样即使 native 在某一步 abort() 整个进程，崩前最后一条 marker 仍能在 log 里看到。
+     */
+    private fun diagSyncInit() {
+        try {
+            // 用一个临时 AssistantEngine 实际跑 initModels
+            CrashLogger.log("INFO", "DIAG", ">>> diag start, thread=${Thread.currentThread().name}")
+            CrashLogger.flushNow()
+
+            val baseDir = modelManager.getModelDir().absolutePath
+            val sel = modelManager.selection
+            CrashLogger.log("INFO", "DIAG", "baseDir=$baseDir, vad=${sel.vad.id}/${sel.vad.dirName}, asr=${sel.asr.id}/${sel.asr.dirName}, tts=${sel.tts.id}/${sel.tts.dirName}")
+            CrashLogger.flushNow()
+
+            // 详细列出每个文件是否存在 + 大小
+            fun dumpDir(label: String, dir: File) {
+                if (!dir.exists()) {
+                    CrashLogger.log("INFO", "DIAG", "$label: DIR NOT EXIST -> ${dir.absolutePath}")
+                } else {
+                    val files = dir.listFiles() ?: emptyArray()
+                    CrashLogger.log("INFO", "DIAG", "$label: ${dir.absolutePath}, files=${files.size}")
+                    files.forEach { f ->
+                        CrashLogger.log("INFO", "DIAG", "   - ${f.name} size=${f.length()} isDir=${f.isDirectory}")
+                    }
+                }
+                CrashLogger.flushNow()
+            }
+            dumpDir("VAD dir", File(baseDir, sel.vad.dirName))
+            dumpDir("ASR dir", File(baseDir, sel.asr.dirName))
+            dumpDir("TTS dir", File(baseDir, sel.tts.dirName))
+
+            CrashLogger.log("INFO", "DIAG", "=== before loadLibrary ===")
+            CrashLogger.flushNow()
+            System.loadLibrary("sherpa-onnx-jni")
+            CrashLogger.log("INFO", "DIAG", "=== after loadLibrary OK ===")
+            CrashLogger.flushNow()
+
+            // 试构造 VAD (这是 initModels 里第一步，最可能崩)
+            CrashLogger.log("INFO", "DIAG", "=== before new Vad(...) — 如果进程在这里之后死掉，说明 native 在 Vad init 内部 abort，多半是 silero_vad.onnx 路径错的或文件损坏 ===")
+            CrashLogger.flushNow()
+            val vadCfg = com.k2fsa.sherpa.onnx.VadModelConfig(
+                sileroVadModelConfig = com.k2fsa.sherpa.onnx.SileroVadModelConfig(
+                    model = "$baseDir/${sel.vad.dirName}/silero_vad.onnx",
+                    threshold = 0.5f,
+                    minSilenceDuration = 0.5f,
+                    minSpeechDuration = 0.25f,
+                    windowSize = 512,
+                    maxSpeechDuration = 30.0f,
+                ),
+                sampleRate = 16000,
+                numThreads = 1,
+            )
+            val vad = com.k2fsa.sherpa.onnx.Vad(config = vadCfg)
+            CrashLogger.log("INFO", "DIAG", "=== Vad OK, vad=$vad ===")
+            CrashLogger.flushNow()
+            vad.release()
+
+            // ASR
+            CrashLogger.log("INFO", "DIAG", "=== before ASR init ===")
+            CrashLogger.flushNow()
+            // 选 streaming / offline 复用 Engine 里的逻辑不太好直接拿到 private 方法，复用一个最简的 sense voice
+            // 实际跑 initStreaming/Offline 会用 Engine 自己的方法
+            CrashLogger.log("INFO", "DIAG", "   skipping ASR detail init here，单独 crash 难诊断、留给 engine.start 复跑")
+            CrashLogger.flushNow()
+
+            CrashLogger.log("INFO", "DIAG", ">>> diag complete — 如果看到这里说明 VAD init 没崩，那崩点在 ASR/TTS init 或 listenLoop")
+            CrashLogger.flushNow()
+            runOnUiThread {
+                Toast.makeText(this, "VAD init 成功，已跳转到 log 页", Toast.LENGTH_LONG).show()
+                startActivity(Intent(this, LogActivity::class.java))
+            }
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "DIAG", message = "diag 同步初始化抛 ${t.javaClass.name}", throwable = t)
+            CrashLogger.flushNow()
+            runOnUiThread {
+                Toast.makeText(this, "崩溃已记录：${t.javaClass.simpleName}: ${t.message}", Toast.LENGTH_LONG).show()
+                startActivity(Intent(this, LogActivity::class.java))
+            }
         }
     }
 
