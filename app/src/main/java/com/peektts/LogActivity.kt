@@ -2,6 +2,9 @@ package com.peektts
 
 import android.content.Intent
 import android.os.Bundle
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.ForegroundColorSpan
 import android.text.method.ScrollingMovementMethod
 import android.widget.Button
 import android.widget.TextView
@@ -64,13 +67,31 @@ class LogActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildText(): String {
+    private fun buildText(): SpannableStringBuilder {
         val snap = CrashLogger.snapshot()
-        val sb = StringBuilder()
+        val sb = SpannableStringBuilder()
         sb.append("=== PeekTTS 运行日志（共 ${snap.size} 条）===\n\n")
-        snap.forEach { sb.append(CrashLogger.renderForDisplay(it)).append("\n\n") }
+        snap.forEach { e ->
+            val sectionStart = sb.length
+            sb.append(CrashLogger.renderForDisplay(e))
+            val sectionEnd = sb.length
+            // 按级别染不同颜色，便于快速找到 CRASH/ERROR
+            val color = when (e.level) {
+                "CRASH" -> 0xFFFF6B6B.toInt()       // 亮红
+                "ERROR" -> 0xFFFF9A4D.toInt()        // 橙
+                "WARN" -> 0xFFFFD166.toInt()         // 黄
+                "INFO" -> 0xFFEAEAEA.toInt()         // 浅白
+                else -> 0xFFB6B6B6.toInt()
+            }
+            sb.setSpan(
+                ForegroundColorSpan(color),
+                sectionStart, sectionEnd,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            sb.append("\n\n")
+        }
         sb.append("=== END ===")
-        return sb.toString()
+        return sb
     }
 
     private fun render() {
