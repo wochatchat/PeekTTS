@@ -130,6 +130,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         btnToggle.setOnClickListener {
+            // Android 14+ 启动 microphone 类型的前台服务必须先授权 RECORD_AUDIO,
+            // 否则会 SecurityException 闪退。先确认权限,缺失时请求并中止启动。
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.RECORD_AUDIO),
+                    100
+                )
+                Toast.makeText(this, "请先授权麦克风权限", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             val intent = Intent(this, AssistantService::class.java)
             intent.action = AssistantService.ACTION_TOGGLE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
