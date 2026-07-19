@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">PeekTTS</string>
+    <string name="notification_title">PeekTTS 运行中</string>
+    <string name="notification_text">随时可以说话，无需唤醒词</string>
+</resources>
