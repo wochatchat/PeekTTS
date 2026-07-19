@@ -72,6 +72,7 @@ jobs:
           fi
 
       - name: Commit APK to repository
+        if: github.event_name == 'push'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -80,8 +81,10 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "ci: build APK #${{ github.run_number }} [skip ci]"
-            git push
-            echo "✓ APK committed and pushed"
+            # PR 触发时 actions/checkout 处于 detached HEAD，push 会失败；
+            # 此处显式推回触发分支，避免 "not currently on a branch" 报错。
+            git push origin "HEAD:${GITHUB_REF#refs/heads/}"
+            echo "✓ APK committed and pushed to ${GITHUB_REF#refs/heads/}"
           fi
 
       - name: Upload APK artifact
