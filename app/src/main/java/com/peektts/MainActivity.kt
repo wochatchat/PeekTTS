@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchAutoStart: Switch
     private lateinit var btnOpenLog: Button
     private lateinit var btnDiag: Button
+    private lateinit var btnReExtract: Button
 
     private val modelManager by lazy { ModelManager(this) }
 
@@ -101,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         switchAutoStart = findViewById(R.id.switchAutoStart)
         btnOpenLog = findViewById(R.id.btnOpenLog)
         btnDiag = findViewById(R.id.btnDiag)
+        btnReExtract = findViewById(R.id.btnReExtract)
     }
 
     private fun setupModelSpinners() {
@@ -221,6 +223,42 @@ class MainActivity : AppCompatActivity() {
             Thread { diagSyncInit() }.start()
         }
 
+        btnReExtract.setOnClickListener {
+            // 不重新下载，用刚改好的纯 Java tar 解压器把 TTS 目录里残留的 .tar.bz2 重新解压一遍。
+            // 解完会把压缩包删除，并清理之前 strip 失败导致的嵌套目录。
+            Toast.makeText(this, "正在重新解压 TTS 模型，请等待...", Toast.LENGTH_LONG).show()
+            Thread {
+                try {
+                    CrashLogger.log("INFO", "ReEx", ">>> reExtractTtsArchive start")
+                    CrashLogger.flushNow()
+                    val n = modelManager.reExtractTtsArchive()
+                    CrashLogger.log("INFO", "ReEx", ">>> reExtractTtsArchive done, archives reprocessed=$n")
+                    CrashLogger.flushNow()
+                    val ready = modelManager.isTtsReady()
+                    CrashLogger.log("INFO", "ReEx", "isTtsReady=$ready, listing tts dir:")
+                    val dir = java.io.File(modelManager.getTtsDir().absolutePath)
+                    if (dir.exists()) {
+                        dir.listFiles()?.forEach { f ->
+                            CrashLogger.log("INFO", "ReEx", "   - ${f.name} size=${f.length()} isDir=${f.isDirectory}")
+                        }
+                    }
+                    CrashLogger.flushNow()
+                    runOnUiThread {
+                        refreshModelStatus()
+                        Toast.makeText(this, if (n < 0) "压缩包不存在，可能未下载" else "重新解压完成，准备诊断", Toast.LENGTH_LONG).show()
+                        startActivity(Intent(this, LogActivity::class.java))
+                    }
+                } catch (t: Throwable) {
+                    CrashLogger.error(tag = "ReEx", message = "重新解压失败", throwable = t)
+                    CrashLogger.flushNow()
+                    runOnUiThread {
+                        Toast.makeText(this, "重新解压出错：${t.message}", Toast.LENGTH_LONG).show()
+                        startActivity(Intent(this, LogActivity::class.java))
+                    }
+                }
+            }.start()
+        }
+
         switchAutoStart.setOnCheckedChangeListener { _, isChecked ->
             getSharedPreferences("peektts", MODE_PRIVATE)
                 .edit().putBoolean("auto_start_boot", isChecked).apply()
@@ -280,23 +318,83 @@ class MainActivity : AppCompatActivity() {
                 sampleRate = 16000,
                 numThreads = 1,
             )
-            val vad = com.k2fsa.sherpa.onnx.Vad(config = vadCfg)
-            CrashLogger.log("INFO", "DIAG", "=== Vad OK, vad=$vad ===")
+            CrashLogger.log("INFO", "DIAG", "=== before ASR init (sel.asr=${sel.asr.id}) ===")
             CrashLogger.flushNow()
-            vad.release()
+            val asrDir = File(baseDir, sel.asr.dirName)
+            when (sel.asr.id) {
+                "asr_zipformer_bi" -> {
+                    CrashLogger.log("INFO", "DIAG", "   Trying OnlineRecognizer(zipformer bi) tokens=${File(asrDir, "tokens.txt").exists()}, enc=${File(asrDir, "encoder-epoch-99-avg-1.onnx").exists()}")
+                    CrashLogger.flushNow()
+                    val asr = com.k2fsa.sherpa.onnx.OnlineRecognizer(
+                        config = com.k2fsa.sherpa.onnx.OnlineRecognizerConfig(
+                            modelConfig = com.k2fsa.sherpa.onnx.OnlineModelConfig(
+                                transducer = com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig(
+                                    encoder = "${asrDir.absolutePath}/encoder-epoch-99-avg-1.onnx",
+                                    decoder = "${asrDir.absolutePath}/decoder-epoch-99-avg-1.onnx",
+                                    joiner = "${asrDir.absolutePath}/joiner-epoch-99-avg-1.onnx",
+                                ),
+                                tokens = "${asrDir.absolutePath}/tokens.txt",
+                                numThreads = 2,
+                                provider = "cpu",
+                                modelType = "zipformer",
+                            ),
+                            endpointConfig = com.k2fsa.sherpa.onnx.EndpointConfig(
+                                rule1 = com.k2fsa.sherpa.onnx.EndpointRule(false, 2.4f, 0.0f),
+                                rule2 = com.k2fsa.sherpa.onnx.EndpointRule(true, 1.2f, 0.0f),
+                                rule3 = com.k2fsa.sherpa.onnx.EndpointRule(false, 0.0f, 20.0f),
+                            ),
+                            enableEndpoint = true,
+                            decodingMethod = "greedy_search",
+                        )
+                    )
+                    CrashLogger.log("INFO", "DIAG", "   OnlineRecognizer(zf bi) OK")
+                    CrashLogger.flushNow()
+                    asr.release()
+                }
+                else -> {
+                    CrashLogger.log("INFO", "DIAG", "   skipping ASR init for ${sel.asr.id}、非 zipformer_bi 暂不诊断")
+                    CrashLogger.flushNow()
+                }
+            }
 
-            // ASR
-            CrashLogger.log("INFO", "DIAG", "=== before ASR init ===")
+            CrashLogger.log("INFO", "DIAG", "=== before TTS init (sel.tts=${sel.tts.id}, tts_dir files=${File(baseDir, sel.tts.dirName).listFiles()?.map { it.name } ?: listOf()}) ===")
             CrashLogger.flushNow()
-            // 选 streaming / offline 复用 Engine 里的逻辑不太好直接拿到 private 方法，复用一个最简的 sense voice
-            // 实际跑 initStreaming/Offline 会用 Engine 自己的方法
-            CrashLogger.log("INFO", "DIAG", "   skipping ASR detail init here，单独 crash 难诊断、留给 engine.start 复跑")
-            CrashLogger.flushNow()
+            val ttsDir = File(baseDir, sel.tts.dirName)
+            val lexFiles = listOf("lexicon.txt", "lexicon-zh.txt")
+                .map { File(ttsDir, it) }
+                .filter { it.exists() && it.length() > 0 }
+                .joinToString(",") { it.absolutePath }
+            if (sel.tts.id in listOf("tts_kokoro_v11", "tts_kokoro_v10")) {
+                CrashLogger.log("INFO", "DIAG", "   Trying OfflineTts(Kokoro) model=${File(ttsDir, "model.onnx").exists()}, voices=${File(ttsDir, "voices.bin").exists()}, tokens=${File(ttsDir, "tokens.txt").exists()}, espeak=${File(ttsDir, "espeak-ng-data").isDirectory}, lex=$lexFiles")
+                CrashLogger.flushNow()
+                val tEngine = com.k2fsa.sherpa.onnx.OfflineTts(
+                    config = com.k2fsa.sherpa.onnx.OfflineTtsConfig(
+                        model = com.k2fsa.sherpa.onnx.OfflineTtsModelConfig(
+                            kokoro = com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig(
+                                model = "${ttsDir.absolutePath}/model.onnx",
+                                voices = "${ttsDir.absolutePath}/voices.bin",
+                                tokens = "${ttsDir.absolutePath}/tokens.txt",
+                                dataDir = "${ttsDir.absolutePath}/espeak-ng-data",
+                                lexicon = lexFiles,
+                                lengthScale = 1.0f,
+                            ),
+                            numThreads = 4,
+                            provider = "cpu",
+                        )
+                    )
+                )
+                CrashLogger.log("INFO", "DIAG", "   OfflineTts(Kokoro) OK, sampleRate=${tEngine.sampleRate()}")
+                CrashLogger.flushNow()
+                tEngine.release()
+            } else {
+                CrashLogger.log("INFO", "DIAG", "   skipping TTS init for ${sel.tts.id}、非 kokoro 暂不诊断")
+                CrashLogger.flushNow()
+            }
 
-            CrashLogger.log("INFO", "DIAG", ">>> diag complete — 如果看到这里说明 VAD init 没崩，那崩点在 ASR/TTS init 或 listenLoop")
+            CrashLogger.log("INFO", "DIAG", ">>> diag complete — 如果看到这里说明所有 native init 都跑通了，崩点在 listenLoop")
             CrashLogger.flushNow()
             runOnUiThread {
-                Toast.makeText(this, "VAD init 成功，已跳转到 log 页", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "全部 native init 成功，已跳转 log 页", Toast.LENGTH_LONG).show()
                 startActivity(Intent(this, LogActivity::class.java))
             }
         } catch (t: Throwable) {

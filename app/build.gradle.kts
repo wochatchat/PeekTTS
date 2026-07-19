@@ -83,4 +83,9 @@ dependencies {
 
     // For downloading models at runtime
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // For extracting tar.bz2 model archives (Android toybox tar 不支持 --strip-components，
+    // 会导致 Kokoro TTS 解压后 voices.bin/tokens.txt/espeak-ng-data 全在嵌套子目录里，
+    // native init 找不到文件直接 abort 整个进程)
+    implementation("org.apache.commons:commons-compress:1.26.1")
 }

@@ -65,7 +65,14 @@ class ModelManager(private val context: Context) {
     fun isTtsReady(): Boolean {
         val dir = getTtsDir()
         return when (selection.tts.id) {
-            "tts_kokoro_v11", "tts_kokoro_v10" -> File(dir, "model.onnx").exists()
+            "tts_kokoro_v11", "tts_kokoro_v10" -> {
+                // 严格检查：native init 全需要的文件都齐
+                File(dir, "model.onnx").exists() &&
+                    File(dir, "voices.bin").exists() &&
+                    File(dir, "tokens.txt").exists() &&
+                    File(dir, "espeak-ng-data").isDirectory &&
+                    (File(dir, "lexicon.txt").exists() || File(dir, "lexicon-zh.txt").exists())
+            }
             "tts_vits_zh" -> dir.listFiles()?.any { it.name.endsWith(".onnx") } == true
             "tts_vits_melo" -> File(dir, "vits-melo-tts-zh_en.onnx").exists()
             else -> false
@@ -84,6 +91,46 @@ class ModelManager(private val context: Context) {
 
     fun cancelDownload() {
         cancelFlag.set(true)
+    }
+
+    /**
+     * 重新解压已下载的 TTS 压缩包。用途：之前 toybox tar 失败导致文件困在子目录里，
+     * 现在使用纯 Java tar 解压器重新解一遍即可，不用重新下载 364MB。
+     * 返回：解压出的文件数 < 0 表示压缩包不存在
+     */
+    fun reExtractTtsArchive(): Int {
+        val dir = getTtsDir().apply { mkdirs() }
+        // 找压缩包
+        val archives = dir.listFiles { f -> f.name.endsWith(".tar.bz2") }.orEmpty()
+        if (archives.isEmpty()) return -1
+        var total = 0
+        for (a in archives) {
+            CrashLogger.log("INFO", tag, "reExtract ${a.name} -> ${dir.absolutePath}")
+            CrashLogger.flushNow()
+            extractTarBz2(a, dir)
+            // 解压完删压缩包
+            a.delete()
+            total++
+        }
+        // 如果 strip 失败曾经解出过顶层目录，那种情况就让顶层目录里的旧 model.onnx 等不会被覆盖。
+        // 这里手动清理目录的子目录 "kokoro-multi-lang-v1_1" 等。
+        dir.listFiles { f -> f.isDirectory }?.forEach { sub ->
+            // 看是否是 strip 失败遗留的嵌套
+            if (sub.listFiles()?.any { it.name in listOf("model.onnx", "voices.bin") } == true) {
+                // 这种情况说明真 unpack 时 strip 失败，把子目录里所有东西复制到 targetDir 顶层
+                CrashLogger.log("WARN", tag, "detected nested leftover ${sub.name}, copying contents to parent and removing it")
+                sub.walkTopDown().forEach { src ->
+                    val rel = src.absolutePath.substring(sub.absolutePath.length).trimStart('/')
+                    if (rel.isNotEmpty()) {
+                        val dst = File(dir, rel)
+                        if (src.isFile) {
+                            if (!dst.exists()) src.copyTo(dst, overwrite = false)
+                        }
+                    }
+                }
+            }
+        }
+        return total
     }
 
     /**
@@ -280,35 +327,68 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    /** 解压 tar.bz2 文件 (自动去除顶层目录) */
+    /**
+     * 解压 tar.bz2 文件 (自动 strip 顶层目录)
+     *
+     * 实现说明：原本用 ProcessBuilder 调系统 `tar` + `--strip-components=1`，
+     * 但 Android 自带的 toybox tar 对 --strip-components 支持不稳，会导致
+     * Kokoro TTS 的 voices.bin/tokens.txt/espeak-ng-data 全部困在嵌套子目录
+     * `kokoro-multi-lang-v1_1/` 里，native 拿绝对路径找不到文件直接 abort。
+     *
+     * 改用 Apache Commons Compress 纯 Java 解压 + 手动 strip 第一个路径段。
+     */
     private fun extractTarBz2(archiveFile: File, targetDir: File) {
-        // sherpa-onnx 模型包都有一个顶层目录，用 --strip-components=1 去掉
-        val process = ProcessBuilder(
-            "tar", "xjf", archiveFile.absolutePath,
-            "-C", targetDir.absolutePath,
-            "--strip-components=1"
-        ).redirectErrorStream(true)
+        targetDir.mkdirs()
 
-        val proc = process.start()
-        val output = proc.inputStream.bufferedReader().readText()
-        val exitCode = proc.waitFor()
+        // Commons Compress 的流式 API：BZip2 解码 + TarArchiveInputStream
+        archiveFile.inputStream().buffered().use { fis ->
+            val bzIn = org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream(fis)
+            org.apache.commons.compress.archivers.tar.TarArchiveInputStream(bzIn).use { tarIn ->
+                var entry = tarIn.nextTarEntry
+                while (entry != null) {
+                    val name = entry.name
+                    // strip 顶层目录: kokoro-multi-lang-v1_1/voices.bin -> voices.bin
+                    val strippedName = stripTopDir(name)
+                    if (strippedName.isBlank()) {
+                        entry = tarIn.nextTarEntry
+                        continue
+                    }
 
-        if (exitCode != 0) {
-            Log.e(tag, "Extract failed (exit $exitCode): $output")
-            // 如果 strip-components=1 失败，尝试不 strip
-            Log.w(tag, "Retrying extraction without strip-components...")
-            val process2 = ProcessBuilder(
-                "tar", "xjf", archiveFile.absolutePath,
-                "-C", targetDir.absolutePath
-            ).redirectErrorStream(true)
-            val proc2 = process2.start()
-            val output2 = proc2.inputStream.bufferedReader().readText()
-            val exit2 = proc2.waitFor()
-            if (exit2 != 0) {
-                throw IOException("解压失败: $output2")
+                    val outFile = File(targetDir, strippedName)
+                    if (entry.isDirectory) {
+                        outFile.mkdirs()
+                    } else {
+                        outFile.parentFile?.mkdirs()
+                        outFile.outputStream().use { out ->
+                            val buf = ByteArray(8192)
+                            while (true) {
+                                val read = tarIn.read(buf)
+                                if (read == -1) break
+                                out.write(buf, 0, read)
+                            }
+                        }
+                        // 保留可执行位（如有）
+                        try {
+                            outFile.setExecutable(true)
+                        } catch (_: Throwable) {}
+                    }
+                    entry = tarIn.nextTarEntry
+                }
             }
         }
         Log.i(tag, "Extracted to ${targetDir.absolutePath}")
+    }
+
+    /** 去掉 tar entry 的顶层目录段 */
+    private fun stripTopDir(name: String): String {
+        val parts = name.split('/').filter { it.isNotEmpty() }
+        return if (parts.size > 1) {
+            // 去掉第一段，剩下用 / 重组
+            parts.drop(1).joinToString("/")
+        } else {
+            // 单段文件名（如 README）保留即可
+            parts.joinToString("/")
+        }
     }
 
     // ==================== 持久化选择 ====================

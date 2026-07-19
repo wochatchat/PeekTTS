@@ -248,6 +248,14 @@ class AssistantEngine(private val context: Context) {
 
     private fun initKokoroTts(baseDir: String, dirName: String) {
         val dir = "$baseDir/$dirName"
+        // kokoro-multi-lang-v1_1 解压后包含 lexicon.txt + lexicon-zh.txt，sherpa-onnx 支持逗号分隔多 lexicon。
+        // 如果某个不存在则跳过，避免 native 拿不到文件直接 abort 整个进程。
+        val lexFiles = listOf("lexicon.txt", "lexicon-zh.txt")
+            .map { File("$dir/$it") }
+            .filter { it.exists() && it.length() > 0 }
+            .joinToString(",") { it.absolutePath }
+        CrashLogger.log("INFO", tag, "initKokoroTts dir=$dir, lexicon=$lexFiles, model=${File("$dir/model.onnx").exists()}, voices=${File("$dir/voices.bin").exists()}, tokens=${File("$dir/tokens.txt").exists()}, espeak=${File("$dir/espeak-ng-data").isDirectory}")
+        CrashLogger.flushNow()
         tts = OfflineTts(config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
                 kokoro = OfflineTtsKokoroModelConfig(
@@ -255,7 +263,7 @@ class AssistantEngine(private val context: Context) {
                     voices = "$dir/voices.bin",
                     tokens = "$dir/tokens.txt",
                     dataDir = "$dir/espeak-ng-data",
-                    lexicon = "$dir/lexicon.txt",
+                    lexicon = lexFiles,
                     lengthScale = 1.0f,
                 ),
                 numThreads = 4,
@@ -263,6 +271,7 @@ class AssistantEngine(private val context: Context) {
             ),
         ))
     }
+
 
     private fun initVitsTts(baseDir: String, dirName: String) {
         val dir = "$baseDir/$dirName"

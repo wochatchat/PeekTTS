@@ -208,5 +208,13 @@
             android:text="诊断：同步初始化 (主线程)"
             android:textSize="14sp" />
 
+        <Button
+            android:id="@+id/btnReExtract"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="重新解压 TTS 压缩包"
+            android:textSize="14sp" />
+
     </LinearLayout>
 </ScrollView>
