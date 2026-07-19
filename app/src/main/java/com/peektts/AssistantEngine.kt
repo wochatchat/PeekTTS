@@ -61,8 +61,15 @@ class AssistantEngine(private val context: Context) {
             isRunning = true
             service?.broadcastState("listening")
             listenJob = scope.launch { listenLoop() }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to start engine", e)
+        } catch (t: Throwable) {
+            // 注意：必须用 Throwable 而非 Exception。
+            // native 库加载失败抛的是 UnsatisfiedLinkError (Error 子类)，
+            // 用 Exception 接不住，会逃逸到 Service 进程让整个 App 闪退。
+            CrashLogger.error(
+                tag = tag,
+                message = "engine.start() 抛异常 (${t.javaClass.name})",
+                throwable = t
+            )
             service?.broadcastState("error")
         }
     }
@@ -95,38 +102,70 @@ class AssistantEngine(private val context: Context) {
     private fun initModels() {
         val baseDir = modelManager.getModelDir().absolutePath
         val sel = modelManager.selection
+        CrashLogger.log("INFO", tag, "initModels: baseDir=$baseDir, vad=${sel.vad.id}, asr=${sel.asr.id}, tts=${sel.tts.id}")
+
+        // 0. 提前显式加载 native 库，失败立即抛可读错误。
+        //    如果不在这一步失败，后面 new Vad(...) 触发类初始化时也会失败但堆栈更隐蔽。
+        try {
+            System.loadLibrary("sherpa-onnx-jni")
+            CrashLogger.log("INFO", tag, "System.loadLibrary(\"sherpa-onnx-jni\") OK")
+        } catch (t: Throwable) {
+            CrashLogger.error(
+                tag = tag,
+                message = "loadLibrary 失败: libsherpa-onnx-jni.so 找不到/依赖缺失。ABI=${android.os.Build.SUPPORTED_ABIS.joinToString(",")}",
+                throwable = t
+            )
+            throw t
+        }
 
         // 1. VAD (固定使用 Silero)
-        vad = Vad(config = VadModelConfig(
-            sileroVadModelConfig = SileroVadModelConfig(
-                model = "$baseDir/${sel.vad.dirName}/silero_vad.onnx",
-                threshold = 0.5f,
-                minSilenceDuration = 0.5f,
-                minSpeechDuration = 0.25f,
-                windowSize = vadWindowSize,
-                maxSpeechDuration = 30.0f,
-            ),
-            sampleRate = sampleRate,
-            numThreads = 1,
-        ))
-        Log.i(tag, "VAD initialized")
+        try {
+            val vadFile = File("$baseDir/${sel.vad.dirName}/silero_vad.onnx")
+            CrashLogger.log("INFO", tag, "VAD model path: ${vadFile.absolutePath}, exists=${vadFile.exists()}, size=${if (vadFile.exists()) vadFile.length() else -1}")
+            vad = Vad(config = VadModelConfig(
+                sileroVadModelConfig = SileroVadModelConfig(
+                    model = "$baseDir/${sel.vad.dirName}/silero_vad.onnx",
+                    threshold = 0.5f,
+                    minSilenceDuration = 0.5f,
+                    minSpeechDuration = 0.25f,
+                    windowSize = vadWindowSize,
+                    maxSpeechDuration = 30.0f,
+                ),
+                sampleRate = sampleRate,
+                numThreads = 1,
+            ))
+            CrashLogger.log("INFO", tag, "VAD initialized")
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = tag, message = "VAD 初始化失败 (sel.vad=${sel.vad.id}, dir=${sel.vad.dirName})", throwable = t)
+            throw t
+        }
 
         // 2. ASR — 根据选择初始化流式或非流式
-        when (sel.asr.id) {
-            "asr_zipformer_bi" -> initStreamingAsr(baseDir, sel.asr.dirName)
-            "asr_sense_voice" -> initSenseVoiceAsr(baseDir, sel.asr.dirName)
-            "asr_paraformer" -> initParaformerAsr(baseDir, sel.asr.dirName)
-            "asr_whisper_tiny" -> initWhisperAsr(baseDir, sel.asr.dirName)
+        try {
+            when (sel.asr.id) {
+                "asr_zipformer_bi" -> initStreamingAsr(baseDir, sel.asr.dirName)
+                "asr_sense_voice" -> initSenseVoiceAsr(baseDir, sel.asr.dirName)
+                "asr_paraformer" -> initParaformerAsr(baseDir, sel.asr.dirName)
+                "asr_whisper_tiny" -> initWhisperAsr(baseDir, sel.asr.dirName)
+            }
+            CrashLogger.log("INFO", tag, "ASR initialized: ${sel.asr.id}")
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = tag, message = "ASR 初始化失败 (sel.asr=${sel.asr.id}, dir=${sel.asr.dirName})", throwable = t)
+            throw t
         }
-        Log.i(tag, "ASR initialized: ${sel.asr.id}")
 
         // 3. TTS — 根据选择初始化
-        when (sel.tts.id) {
-            "tts_kokoro_v11", "tts_kokoro_v10" -> initKokoroTts(baseDir, sel.tts.dirName)
-            "tts_vits_zh" -> initVitsTts(baseDir, sel.tts.dirName)
-            "tts_vits_melo" -> initVitsMeloTts(baseDir, sel.tts.dirName)
+        try {
+            when (sel.tts.id) {
+                "tts_kokoro_v11", "tts_kokoro_v10" -> initKokoroTts(baseDir, sel.tts.dirName)
+                "tts_vits_zh" -> initVitsTts(baseDir, sel.tts.dirName)
+                "tts_vits_melo" -> initVitsMeloTts(baseDir, sel.tts.dirName)
+            }
+            CrashLogger.log("INFO", tag, "TTS initialized: ${sel.tts.id}, sampleRate=${tts?.sampleRate()}")
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = tag, message = "TTS 初始化失败 (sel.tts=${sel.tts.id}, dir=${sel.tts.dirName})", throwable = t)
+            throw t
         }
-        Log.i(tag, "TTS initialized: ${sel.tts.id}, sampleRate=${tts?.sampleRate()}")
     }
 
     private fun initStreamingAsr(baseDir: String, dirName: String) {
@@ -373,8 +412,9 @@ class AssistantEngine(private val context: Context) {
             vad?.reset()
             service?.broadcastState("listening")
 
-        } catch (e: Exception) {
-            Log.e(tag, "Error processing speech", e)
+        } catch (t: Throwable) {
+            // 同上：捕获 Throwable 兜底 native 抛的 Error
+            CrashLogger.error(tag = tag, message = "processSpeechSegment 抛异常", throwable = t)
             service?.broadcastState("listening")
         }
     }

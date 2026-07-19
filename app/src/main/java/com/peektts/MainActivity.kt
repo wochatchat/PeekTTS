@@ -61,6 +61,26 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
         checkPermissions()
         refreshModelStatus()
+        preflightNativeLib()
+    }
+
+    /**
+     * 在主线程显式预加载 native 库：
+     *  - 通过 try/catch(Throwable) 暴露 loadLibrary 失败
+     *  - 失败时 App 仍然能开，但点击启动助手按钮后 Service 也不会再"莫名其妙"闪退
+     *  - 把结果记到 CrashLogger，让日志页能看到
+     */
+    private fun preflightNativeLib() {
+        try {
+            System.loadLibrary("sherpa-onnx-jni")
+            CrashLogger.log("INFO", "MainActivity", "preflight: loadLibrary OK, abi=${android.os.Build.SUPPORTED_ABIS.joinToString(",")}")
+        } catch (t: Throwable) {
+            CrashLogger.error(
+                tag = "MainActivity",
+                message = "preflight: loadLibrary(\"sherpa-onnx-jni\") 失败 — 模型可能未含对应 ABI 或 .so 文件缺失/被 ProGuard 剥离",
+                throwable = t
+            )
+        }
     }
 
     private fun initViews() {
@@ -260,6 +280,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+
+        // 上次 MainActivity 不可见时若有新增 CRASH 级别日志，自动跳转 LogActivity。
+        // 解决按钮点击 → Service 内崩溃 → App 进程被系统杀 → 再点开 App 看不到 log 的盲点。
+        val lastSeen = getSharedPreferences("peektts", MODE_PRIVATE).getInt("last_crash_seen", 0)
+        val currentCount = CrashLogger.snapshot().count { it.level == "CRASH" || it.level == "ERROR" }
+        if (currentCount > lastSeen) {
+            getSharedPreferences("peektts", MODE_PRIVATE).edit().putInt("last_crash_seen", currentCount).apply()
+            startActivity(Intent(this, LogActivity::class.java))
+        }
+
         val filter = android.content.IntentFilter().apply {
             addAction(AssistantService.ACTION_STATE_CHANGED)
             addAction(AssistantService.ACTION_CONVERSATION_UPDATE)

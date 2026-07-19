@@ -48,11 +48,14 @@ class AssistantService : Service() {
     }
 
     private fun startAssistant() {
+        var foregroundStarted = false
         try {
             startForeground(NOTIFICATION_ID, createNotification("语音助手运行中", "随时可以说话"))
+            foregroundStarted = true
         } catch (t: Throwable) {
-            CrashLogger.error(tag = "AssistantService", message = "startForeground 失败", throwable = t)
+            CrashLogger.error(tag = "AssistantService", message = "startForeground 失败 (foregroundServiceType=microphone, sdk=${android.os.Build.VERSION.SDK_INT}, permission 已在 manifest 声明)", throwable = t)
             broadcastState("error")
+            openLogActivity()
             return
         }
 
@@ -61,14 +64,37 @@ class AssistantService : Service() {
             CrashLogger.log("WARN", "AssistantService", "model not ready, please download models first")
             broadcastState("error")
             broadcastModelStatus("请先下载模型", -1)
+            // 模型未就绪不是崩溃；但 stopForeground 以便释放通知
+            if (foregroundStarted) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
+            }
+            stopSelf()
             return
         }
 
         try {
             engine?.start()
         } catch (t: Throwable) {
-            CrashLogger.error(tag = "AssistantService", message = "engine.start() 抛异常", throwable = t)
+            CrashLogger.error(tag = "AssistantService", message = "engine.start() 抛异常, 打开 LogActivity 给用户看堆栈", throwable = t)
             broadcastState("error")
+            openLogActivity()
+        }
+    }
+
+    /** 把 LogActivity 拉到前台让用户看崩溃日志 */
+    private fun openLogActivity() {
+        try {
+            val it = Intent(this, LogActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(it)
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "启动 LogActivity 也失败了", throwable = t)
         }
     }
 
