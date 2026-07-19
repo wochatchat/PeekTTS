@@ -191,5 +191,14 @@
             android:minHeight="200dp"
             android:text="对话将显示在这里...\n" />
 
+        <!-- ============ 日志 ============ -->
+        <Button
+            android:id="@+id/btnOpenLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="查看运行日志 / 崩溃报告"
+            android:textSize="14sp" />
+
     </LinearLayout>
 </ScrollView>

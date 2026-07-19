@@ -14,51 +14,85 @@ class AssistantService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        engine = AssistantEngine(this)
+        try {
+            engine = AssistantEngine(this)
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "AssistantEngine 构造失败（可能 native 库加载失败）", throwable = t)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_TOGGLE -> {
-                if (engine?.isRunning == true) {
-                    stopAssistant()
-                } else {
-                    startAssistant()
+        return try {
+            when (intent?.action) {
+                ACTION_TOGGLE -> {
+                    if (engine?.isRunning == true) {
+                        stopAssistant()
+                    } else {
+                        startAssistant()
+                    }
                 }
+                ACTION_START -> startAssistant()
+                ACTION_STOP -> stopAssistant()
             }
-            ACTION_START -> startAssistant()
-            ACTION_STOP -> stopAssistant()
-        }
 
-        // If no action, default to start
-        if (intent?.action == null) {
-            startAssistant()
-        }
+            // If no action, default to start
+            if (intent?.action == null) {
+                startAssistant()
+            }
 
-        return START_STICKY
+            START_STICKY
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "onStartCommand 抛异常, action=${intent?.action}", throwable = t)
+            START_NOT_STICKY
+        }
     }
 
     private fun startAssistant() {
-        startForeground(NOTIFICATION_ID, createNotification("语音助手运行中", "随时可以说话"))
+        try {
+            startForeground(NOTIFICATION_ID, createNotification("语音助手运行中", "随时可以说话"))
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "startForeground 失败", throwable = t)
+            broadcastState("error")
+            return
+        }
 
         val modelManager = ModelManager(this)
         if (!modelManager.areModelsReady()) {
+            CrashLogger.log("WARN", "AssistantService", "model not ready, please download models first")
             broadcastState("error")
             broadcastModelStatus("请先下载模型", -1)
             return
         }
 
-        engine?.start()
+        try {
+            engine?.start()
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "engine.start() 抛异常", throwable = t)
+            broadcastState("error")
+        }
     }
 
     private fun stopAssistant() {
-        engine?.stop()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            engine?.stop()
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "engine.stop() 抛异常", throwable = t)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         stopSelf()
     }
 
     override fun onDestroy() {
-        engine?.release()
+        try {
+            engine?.release()
+        } catch (t: Throwable) {
+            CrashLogger.error(tag = "AssistantService", message = "engine.release() 抛异常", throwable = t)
+        }
         engine = null
         super.onDestroy()
     }

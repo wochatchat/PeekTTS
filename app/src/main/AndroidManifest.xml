@@ -31,6 +31,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LogActivity"
+            android:exported="false"
+            android:label="PeekTTS 运行日志"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".AssistantService"
             android:enabled="true"

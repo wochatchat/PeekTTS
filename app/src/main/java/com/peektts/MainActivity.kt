@@ -26,6 +26,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvAsrModelDesc: TextView
     private lateinit var tvTtsModelDesc: TextView
     private lateinit var switchAutoStart: Switch
+    private lateinit var btnOpenLog: Button
 
     private val modelManager by lazy { ModelManager(this) }
 
@@ -76,6 +77,7 @@ class MainActivity : AppCompatActivity() {
         tvAsrModelDesc = findViewById(R.id.tvAsrModelDesc)
         tvTtsModelDesc = findViewById(R.id.tvTtsModelDesc)
         switchAutoStart = findViewById(R.id.switchAutoStart)
+        btnOpenLog = findViewById(R.id.btnOpenLog)
     }
 
     private fun setupModelSpinners() {
@@ -130,12 +132,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         btnToggle.setOnClickListener {
-            val intent = Intent(this, AssistantService::class.java)
-            intent.action = AssistantService.ACTION_TOGGLE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
+            try {
+                val intent = Intent(this, AssistantService::class.java)
+                intent.action = AssistantService.ACTION_TOGGLE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+            } catch (t: Throwable) {
+                CrashLogger.error(
+                    tag = "MainActivity",
+                    message = "点击『启动助手』按钮抛异常",
+                    throwable = t
+                )
+                Toast.makeText(this, "启动助手时出错，正在打开日志页", Toast.LENGTH_LONG).show()
+                android.content.Intent(this, LogActivity::class.java).also {
+                    it.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    startActivity(it)
+                }
             }
         }
 
@@ -169,6 +184,10 @@ class MainActivity : AppCompatActivity() {
 
         btnCancelDownload.setOnClickListener {
             modelManager.cancelDownload()
+        }
+
+        btnOpenLog.setOnClickListener {
+            startActivity(Intent(this, LogActivity::class.java))
         }
 
         switchAutoStart.setOnCheckedChangeListener { _, isChecked ->

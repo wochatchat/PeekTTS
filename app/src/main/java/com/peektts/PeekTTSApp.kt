@@ -8,6 +8,7 @@ import android.os.Build
 class PeekTTSApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        CrashLogger.install(this)
         createNotificationChannel()
     }
 
