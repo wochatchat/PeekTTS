@@ -95,10 +95,11 @@ class AssistantService : Service() {
         sendBroadcast(intent)
     }
 
-    fun broadcastModelStatus(status: String, progress: Int) {
+    fun broadcastModelStatus(status: String, progress: Int, detail: String = "") {
         val intent = Intent(ACTION_MODEL_STATUS)
         intent.putExtra("status", status)
         intent.putExtra("progress", progress)
+        intent.putExtra("detail", detail)
         sendBroadcast(intent)
     }
 

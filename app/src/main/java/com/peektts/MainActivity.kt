@@ -10,38 +10,42 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.peektts.AssistantEngine.EngineState
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var btnToggle: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvModelStatus: TextView
+    private lateinit var tvDownloadDetail: TextView
     private lateinit var tvConversation: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var btnDownloadModels: Button
-    private lateinit var spinnerTtsVoice: Spinner
+    private lateinit var btnCancelDownload: Button
+    private lateinit var spinnerAsrModel: Spinner
+    private lateinit var spinnerTtsModel: Spinner
+    private lateinit var tvAsrModelDesc: TextView
+    private lateinit var tvTtsModelDesc: TextView
     private lateinit var switchAutoStart: Switch
 
     private val modelManager by lazy { ModelManager(this) }
 
-    // Broadcast receiver for engine state updates
     private val stateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
             when (intent?.action) {
                 AssistantService.ACTION_STATE_CHANGED -> {
-                    val state = intent.getStringExtra("state") ?: "idle"
-                    updateStatus(state)
+                    updateStatus(intent.getStringExtra("state") ?: "idle")
                 }
                 AssistantService.ACTION_CONVERSATION_UPDATE -> {
-                    val role = intent.getStringExtra("role") ?: ""
-                    val text = intent.getStringExtra("text") ?: ""
-                    appendConversation(role, text)
+                    appendConversation(
+                        intent.getStringExtra("role") ?: "",
+                        intent.getStringExtra("text") ?: ""
+                    )
                 }
                 AssistantService.ACTION_MODEL_STATUS -> {
                     val status = intent.getStringExtra("status") ?: ""
                     val progress = intent.getIntExtra("progress", -1)
-                    updateModelStatus(status, progress)
+                    val detail = intent.getStringExtra("detail") ?: ""
+                    updateModelStatus(status, progress, detail)
                 }
             }
         }
@@ -52,24 +56,76 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         initViews()
+        setupModelSpinners()
         setupListeners()
         checkPermissions()
-        updateModelStatus(if (modelManager.areModelsReady()) "模型已就绪" else "模型未下载", -1)
+        refreshModelStatus()
     }
 
     private fun initViews() {
         btnToggle = findViewById(R.id.btnToggle)
         tvStatus = findViewById(R.id.tvStatus)
         tvModelStatus = findViewById(R.id.tvModelStatus)
+        tvDownloadDetail = findViewById(R.id.tvDownloadDetail)
         tvConversation = findViewById(R.id.tvConversation)
         progressBar = findViewById(R.id.progressBar)
         btnDownloadModels = findViewById(R.id.btnDownloadModels)
-        spinnerTtsVoice = findViewById(R.id.spinnerTtsVoice)
+        btnCancelDownload = findViewById(R.id.btnCancelDownload)
+        spinnerAsrModel = findViewById(R.id.spinnerAsrModel)
+        spinnerTtsModel = findViewById(R.id.spinnerTtsModel)
+        tvAsrModelDesc = findViewById(R.id.tvAsrModelDesc)
+        tvTtsModelDesc = findViewById(R.id.tvTtsModelDesc)
         switchAutoStart = findViewById(R.id.switchAutoStart)
+    }
 
-        // TTS voice options
-        val voices = arrayOf("默认女声 (0)", "男声 (1)", "女声 (2)", "男声 (3)")
-        spinnerTtsVoice.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices)
+    private fun setupModelSpinners() {
+        // ASR 模型选择
+        val asrNames = ModelRegistry.ASR_OPTIONS.map { "${it.name} (${it.sizeText})" }
+        spinnerAsrModel.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, asrNames)
+        // 选中当前模型
+        val currentAsrIdx = ModelRegistry.ASR_OPTIONS.indexOfFirst { it.id == modelManager.selection.asr.id }
+        if (currentAsrIdx >= 0) spinnerAsrModel.setSelection(currentAsrIdx)
+        updateAsrDesc()
+
+        spinnerAsrModel.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                updateAsrDesc()
+                saveModelSelection()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // TTS 模型选择
+        val ttsNames = ModelRegistry.TTS_OPTIONS.map { "${it.name} (${it.sizeText})" }
+        spinnerTtsModel.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, ttsNames)
+        val currentTtsIdx = ModelRegistry.TTS_OPTIONS.indexOfFirst { it.id == modelManager.selection.tts.id }
+        if (currentTtsIdx >= 0) spinnerTtsModel.setSelection(currentTtsIdx)
+        updateTtsDesc()
+
+        spinnerTtsModel.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                updateTtsDesc()
+                saveModelSelection()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private fun updateAsrDesc() {
+        val opt = ModelRegistry.ASR_OPTIONS[spinnerAsrModel.selectedItemPosition]
+        tvAsrModelDesc.text = opt.description
+    }
+
+    private fun updateTtsDesc() {
+        val opt = ModelRegistry.TTS_OPTIONS[spinnerTtsModel.selectedItemPosition]
+        tvTtsModelDesc.text = opt.description
+    }
+
+    private fun saveModelSelection() {
+        val asrId = ModelRegistry.ASR_OPTIONS[spinnerAsrModel.selectedItemPosition].id
+        val ttsId = ModelRegistry.TTS_OPTIONS[spinnerTtsModel.selectedItemPosition].id
+        modelManager.updateSelection(asrId, ttsId)
+        refreshModelStatus()
     }
 
     private fun setupListeners() {
@@ -86,27 +142,59 @@ class MainActivity : AppCompatActivity() {
         btnDownloadModels.setOnClickListener {
             if (!modelManager.areModelsReady()) {
                 btnDownloadModels.isEnabled = false
+                btnCancelDownload.visibility = View.VISIBLE
                 progressBar.visibility = View.VISIBLE
-                modelManager.downloadAll { status, progress ->
+                saveModelSelection()
+
+                modelManager.downloadAll { status, progress, detail ->
                     runOnUiThread {
                         tvModelStatus.text = status
+                        tvDownloadDetail.text = detail
                         if (progress >= 0) {
                             progressBar.progress = progress
                         }
-                        if (modelManager.areModelsReady()) {
-                            progressBar.visibility = View.GONE
+                        if (progress == 100 || progress == -1) {
                             btnDownloadModels.isEnabled = true
-                            btnDownloadModels.text = "模型已就绪"
-                            Toast.makeText(this, "模型下载完成！", Toast.LENGTH_SHORT).show()
+                            btnCancelDownload.visibility = View.GONE
+                            if (progress == 100) {
+                                progressBar.visibility = View.GONE
+                                Toast.makeText(this, "模型下载完成！", Toast.LENGTH_SHORT).show()
+                            }
+                            refreshModelStatus()
                         }
                     }
                 }
             }
         }
 
+        btnCancelDownload.setOnClickListener {
+            modelManager.cancelDownload()
+        }
+
         switchAutoStart.setOnCheckedChangeListener { _, isChecked ->
-            val prefs = getSharedPreferences("peektts", MODE_PRIVATE)
-            prefs.edit().putBoolean("auto_start_boot", isChecked).apply()
+            getSharedPreferences("peektts", MODE_PRIVATE)
+                .edit().putBoolean("auto_start_boot", isChecked).apply()
+        }
+    }
+
+    private fun refreshModelStatus() {
+        val vadReady = modelManager.isVadReady()
+        val asrReady = modelManager.isAsrReady()
+        val ttsReady = modelManager.isTtsReady()
+
+        val status = buildString {
+            append("VAD: ${if (vadReady) "✅" else "❌"}  ")
+            append("ASR: ${if (asrReady) "✅" else "❌"}  ")
+            append("TTS: ${if (ttsReady) "✅" else "❌"}")
+        }
+        tvModelStatus.text = status
+
+        if (modelManager.areModelsReady()) {
+            btnDownloadModels.text = "✅ 模型已就绪"
+            btnDownloadModels.isEnabled = false
+        } else {
+            btnDownloadModels.text = "下载模型"
+            btnDownloadModels.isEnabled = true
         }
     }
 
@@ -145,11 +233,10 @@ class MainActivity : AppCompatActivity() {
         tvConversation.append("$prefix$text\n\n")
     }
 
-    private fun updateModelStatus(status: String, progress: Int) {
+    private fun updateModelStatus(status: String, progress: Int, detail: String) {
         tvModelStatus.text = status
-        if (progress >= 0) {
-            progressBar.progress = progress
-        }
+        tvDownloadDetail.text = detail
+        if (progress >= 0) progressBar.progress = progress
     }
 
     override fun onResume() {

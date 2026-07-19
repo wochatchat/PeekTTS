@@ -3,29 +3,26 @@ package com.peektts
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.AudioTrack
 import android.media.MediaRecorder
-import android.os.SystemClock
 import android.util.Log
 import com.k2fsa.sherpa.onnx.*
 import com.peektts.audio.AudioPlayer
 import com.peektts.llm.LlmEngine
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * AssistantEngine — 核心编排引擎
+ * AssistantEngine — 核心编排引擎 (v2 支持多模型)
  *
  * Pipeline: 麦克风采集 → VAD检测 → ASR识别 → LLM推理 → TTS合成 → 播放
  *
- * 无唤醒词设计：VAD 持续监听，检测到人声自动触发完整对话流程。
- * 回声处理：TTS 播放时暂停 VAD，播放完毕后恢复监听。
+ * 支持两种 ASR 模式：
+ * - 流式 (Zipformer): 边说边识别，实时显示
+ * - 非流式 (SenseVoice/Paraformer/Whisper): VAD检测到句尾后整体识别
  */
-class AssistantEngine(
-    private val context: Context,
-) {
+class AssistantEngine(private val context: Context) {
+
     private val tag = "AssistantEngine"
     private val service: AssistantService? = context as? AssistantService
 
@@ -38,31 +35,26 @@ class AssistantEngine(
 
     // sherpa-onnx components
     private var vad: Vad? = null
-    private var asr: OnlineRecognizer? = null
+    private var onlineAsr: OnlineRecognizer? = null      // 流式ASR
+    private var offlineAsr: OfflineRecognizer? = null     // 非流式ASR
     private var tts: OfflineTts? = null
     private var asrStream: OnlineStream? = null
 
-    // LLM engine (placeholder for llama.cpp integration)
     private val llm = LlmEngine()
 
     // Audio
     private var audioRecord: AudioRecord? = null
     private var audioPlayer: AudioPlayer? = null
 
-    // Configuration
+    // Config
     private val sampleRate = 16000
-    private val vadSilenceDuration = 0.5f  // seconds of silence to detect end of speech
-    private val vadWindowSize = 512         // samples per VAD window
+    private val vadWindowSize = 512
+    private val isStreamingAsr: Boolean get() = modelManager.selection.asr.id == "asr_zipformer_bi"
 
     private val modelManager = ModelManager(context)
 
-    enum class EngineState {
-        IDLE, LISTENING, RECOGNIZING, THINKING, SPEAKING
-    }
-
     fun start() {
         if (isRunning) return
-
         try {
             initModels()
             initAudio()
@@ -79,60 +71,74 @@ class AssistantEngine(
         isRunning = false
         listenJob?.cancel()
         listenJob = null
-
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
-
         asrStream?.release()
         asrStream = null
-
         audioPlayer?.stop()
         audioPlayer = null
-
         service?.broadcastState("idle")
     }
 
     fun release() {
         stop()
-        vad?.release()
-        vad = null
-        asr?.release()
-        asr = null
-        tts?.release()
-        tts = null
+        vad?.release(); vad = null
+        onlineAsr?.release(); onlineAsr = null
+        offlineAsr?.release(); offlineAsr = null
+        tts?.release(); tts = null
         scope.cancel()
     }
 
-    private fun initModels() {
-        val modelDir = modelManager.getModelDir().absolutePath
+    // ==================== 模型初始化 ====================
 
-        // 1. Init VAD (Silero VAD)
-        val vadConfig = VadModelConfig(
+    private fun initModels() {
+        val baseDir = modelManager.getModelDir().absolutePath
+        val sel = modelManager.selection
+
+        // 1. VAD (固定使用 Silero)
+        vad = Vad(config = VadModelConfig(
             sileroVadModelConfig = SileroVadModelConfig(
-                model = "$modelDir/silero_vad/silero_vad.onnx",
+                model = "$baseDir/${sel.vad.dirName}/silero_vad.onnx",
                 threshold = 0.5f,
-                minSilenceDuration = vadSilenceDuration,
+                minSilenceDuration = 0.5f,
                 minSpeechDuration = 0.25f,
                 windowSize = vadWindowSize,
                 maxSpeechDuration = 30.0f,
             ),
             sampleRate = sampleRate,
             numThreads = 1,
-            provider = "cpu",
-        )
-        vad = Vad(config = vadConfig)
+        ))
         Log.i(tag, "VAD initialized")
 
-        // 2. Init Streaming ASR (Zipformer)
-        val asrConfig = OnlineRecognizerConfig(
+        // 2. ASR — 根据选择初始化流式或非流式
+        when (sel.asr.id) {
+            "asr_zipformer_bi" -> initStreamingAsr(baseDir, sel.asr.dirName)
+            "asr_sense_voice" -> initSenseVoiceAsr(baseDir, sel.asr.dirName)
+            "asr_paraformer" -> initParaformerAsr(baseDir, sel.asr.dirName)
+            "asr_whisper_tiny" -> initWhisperAsr(baseDir, sel.asr.dirName)
+        }
+        Log.i(tag, "ASR initialized: ${sel.asr.id}")
+
+        // 3. TTS — 根据选择初始化
+        when (sel.tts.id) {
+            "tts_kokoro_v11", "tts_kokoro_v10" -> initKokoroTts(baseDir, sel.tts.dirName)
+            "tts_vits_zh" -> initVitsTts(baseDir, sel.tts.dirName)
+            "tts_vits_melo" -> initVitsMeloTts(baseDir, sel.tts.dirName)
+        }
+        Log.i(tag, "TTS initialized: ${sel.tts.id}, sampleRate=${tts?.sampleRate()}")
+    }
+
+    private fun initStreamingAsr(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        onlineAsr = OnlineRecognizer(config = OnlineRecognizerConfig(
             modelConfig = OnlineModelConfig(
                 transducer = OnlineTransducerModelConfig(
-                    encoder = "$modelDir/zipformer-asr/encoder-epoch-99-avg-1.onnx",
-                    decoder = "$modelDir/zipformer-asr/decoder-epoch-99-avg-1.onnx",
-                    joiner = "$modelDir/zipformer-asr/joiner-epoch-99-avg-1.onnx",
+                    encoder = "$dir/encoder-epoch-99-avg-1.onnx",
+                    decoder = "$dir/decoder-epoch-99-avg-1.onnx",
+                    joiner = "$dir/joiner-epoch-99-avg-1.onnx",
                 ),
-                tokens = "$modelDir/zipformer-asr/tokens.txt",
+                tokens = "$dir/tokens.txt",
                 numThreads = 2,
                 provider = "cpu",
                 modelType = "zipformer",
@@ -144,132 +150,205 @@ class AssistantEngine(
             ),
             enableEndpoint = true,
             decodingMethod = "greedy_search",
-        )
-        asr = OnlineRecognizer(config = asrConfig)
-        Log.i(tag, "ASR initialized")
+        ))
+    }
 
-        // 3. Init TTS (Kokoro)
-        val ttsConfig = OfflineTtsConfig(
+    private fun initSenseVoiceAsr(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        offlineAsr = OfflineRecognizer(config = OfflineRecognizerConfig(
+            modelConfig = OfflineModelConfig(
+                senseVoice = OfflineSenseVoiceModelConfig(
+                    model = "$dir/model.int8.onnx",
+                    language = "auto",
+                    useInverseTextNormalization = true,
+                ),
+                tokens = "$dir/tokens.txt",
+                numThreads = 2,
+                provider = "cpu",
+                modelType = "sense_voice",
+            ),
+            decodingMethod = "greedy_search",
+        ))
+    }
+
+    private fun initParaformerAsr(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        offlineAsr = OfflineRecognizer(config = OfflineRecognizerConfig(
+            modelConfig = OfflineModelConfig(
+                paraformer = OfflineParaformerModelConfig(
+                    model = "$dir/model.int8.onnx",
+                ),
+                tokens = "$dir/tokens.txt",
+                numThreads = 2,
+                provider = "cpu",
+                modelType = "paraformer",
+            ),
+            decodingMethod = "greedy_search",
+        ))
+    }
+
+    private fun initWhisperAsr(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        offlineAsr = OfflineRecognizer(config = OfflineRecognizerConfig(
+            modelConfig = OfflineModelConfig(
+                whisper = OfflineWhisperModelConfig(
+                    encoder = "$dir/whisper-tiny-encoder.onnx",
+                    decoder = "$dir/whisper-tiny-decoder.onnx",
+                    language = "zh",
+                    task = "transcribe",
+                    tailPaddings = 1000,
+                ),
+                tokens = "$dir/tiny-tokens.txt",
+                numThreads = 2,
+                provider = "cpu",
+                modelType = "whisper",
+            ),
+            decodingMethod = "greedy_search",
+        ))
+    }
+
+    private fun initKokoroTts(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        tts = OfflineTts(config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
                 kokoro = OfflineTtsKokoroModelConfig(
-                    model = "$modelDir/kokoro-tts/model.onnx",
-                    voices = "$modelDir/kokoro-tts/voices.bin",
-                    tokens = "$modelDir/kokoro-tts/tokens.txt",
-                    dataDir = "$modelDir/kokoro-tts/espeak-ng-data",
-                    lexicon = "$modelDir/kokoro-tts/lexicon.txt",
+                    model = "$dir/model.onnx",
+                    voices = "$dir/voices.bin",
+                    tokens = "$dir/tokens.txt",
+                    dataDir = "$dir/espeak-ng-data",
+                    lexicon = "$dir/lexicon.txt",
                     lengthScale = 1.0f,
                 ),
                 numThreads = 4,
                 provider = "cpu",
             ),
-        )
-        tts = OfflineTts(config = ttsConfig)
-        Log.i(tag, "TTS initialized, sampleRate=${tts?.sampleRate()}")
+        ))
     }
+
+    private fun initVitsTts(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        val modelFile = File(dir).listFiles()?.find { it.name.endsWith(".onnx") }
+        tts = OfflineTts(config = OfflineTtsConfig(
+            model = OfflineTtsModelConfig(
+                vits = OfflineTtsVitsModelConfig(
+                    model = modelFile?.absolutePath ?: "$dir/model.onnx",
+                    lexicon = "$dir/lexicon.txt",
+                    tokens = "$dir/tokens.txt",
+                    dataDir = "$dir/espeak-ng-data",
+                ),
+                numThreads = 2,
+                provider = "cpu",
+            ),
+        ))
+    }
+
+    private fun initVitsMeloTts(baseDir: String, dirName: String) {
+        val dir = "$baseDir/$dirName"
+        tts = OfflineTts(config = OfflineTtsConfig(
+            model = OfflineTtsModelConfig(
+                vits = OfflineTtsVitsModelConfig(
+                    model = "$dir/vits-melo-tts-zh_en.onnx",
+                    lexicon = "$dir/lexicon.txt",
+                    tokens = "$dir/tokens.txt",
+                    dataDir = "$dir/espeak-ng-data",
+                ),
+                numThreads = 2,
+                provider = "cpu",
+            ),
+        ))
+    }
+
+    // ==================== 音频初始化 ====================
 
     private fun initAudio() {
         val minBuf = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
+            sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufferSize = maxOf(minBuf * 2, vadWindowSize * 2 * 2)
+        val bufferSize = maxOf(minBuf * 2, vadWindowSize * 4)
 
         @Suppress("MissingPermission")
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize
+            sampleRate, AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT, bufferSize
         )
-
-        audioPlayer = AudioPlayer(
-            sampleRate = tts?.sampleRate() ?: 24000,
-            channelConfig = AudioFormat.CHANNEL_OUT_MONO,
-        )
-
+        audioPlayer = AudioPlayer(sampleRate = tts?.sampleRate() ?: 24000)
         audioRecord?.startRecording()
-        Log.i(tag, "AudioRecord started, bufferSize=$bufferSize")
     }
 
-    /**
-     * Main listening loop — VAD driven, no wake word needed
-     */
+    // ==================== 监听循环 ====================
+
     private suspend fun listenLoop() {
         val buffer = ShortArray(vadWindowSize)
         val floatBuffer = FloatArray(vadWindowSize)
-        var speechBuffer = mutableListOf<Float>()
-        var isInSpeech = false
+        var streamingActive = false
 
-        while (isRunning && !scope.isActive.not()) {
-            // Pause VAD during TTS playback (echo cancellation)
+        while (isRunning && scope.isActive) {
+            // TTS 播放时暂停 VAD (回声消除)
             if (isSpeaking.get()) {
-                delay(50)
-                continue
+                delay(50); continue
             }
 
             val read = audioRecord?.read(buffer, 0, vadWindowSize) ?: -1
-            if (read <= 0) {
-                delay(10)
-                continue
-            }
+            if (read <= 0) { delay(10); continue }
 
-            // Convert 16-bit PCM to float [-1, 1]
             for (i in 0 until read) {
                 floatBuffer[i] = buffer[i] / 32768.0f
             }
 
-            // Feed to VAD
             vad?.acceptWaveform(floatBuffer.copyOf(read))
 
-            // Check for speech segments
+            // 处理 VAD 检测到的完整语音段
             while (vad?.empty() == false) {
                 val segment = vad?.front() ?: break
                 vad?.pop()
 
-                if (segment.samples.size > sampleRate / 10) {  // min 100ms speech
-                    Log.i(tag, "Speech segment: ${segment.samples.size} samples (${segment.samples.size.toFloat() / sampleRate}s)")
+                if (segment.samples.size > sampleRate / 10) {
+                    Log.i(tag, "Speech segment: ${segment.samples.size} samples")
                     processSpeechSegment(segment.samples)
+                    streamingActive = false
                 }
             }
 
-            // Also do real-time ASR streaming while speech is ongoing
-            if (vad?.isSpeechDetected() == true && !isInSpeech) {
-                isInSpeech = true
-                asrStream = asr?.createStream()
-                service?.broadcastState("recognizing")
-            }
-
-            if (isInSpeech && vad?.isSpeechDetected() == true) {
-                asrStream?.acceptWaveform(floatBuffer.copyOf(read), sampleRate)
-                while (asr?.isReady(asrStream!!) == true) {
-                    asr?.decode(asrStream!!)
+            // 流式 ASR: 实时识别 (边说边出字)
+            if (isStreamingAsr) {
+                if (vad?.isSpeechDetected() == true && !streamingActive) {
+                    streamingActive = true
+                    asrStream = onlineAsr?.createStream()
+                }
+                if (streamingActive && vad?.isSpeechDetected() == true) {
+                    asrStream?.acceptWaveform(floatBuffer.copyOf(read), sampleRate)
+                    while (onlineAsr?.isReady(asrStream!!) == true) {
+                        onlineAsr?.decode(asrStream!!)
+                    }
                 }
             }
         }
     }
 
-    /**
-     * Process a complete speech segment (VAD detected end of speech)
-     */
     private suspend fun processSpeechSegment(samples: FloatArray) {
         try {
-            // Get final ASR result from the streaming session
-            var recognizedText = ""
-            if (asrStream != null) {
-                while (asr?.isReady(asrStream!!) == true) {
-                    asr?.decode(asrStream!!)
-                }
-                val result = asr?.getResult(asrStream!!)
-                recognizedText = result?.text?.trim() ?: ""
-                asrStream?.release()
-                asrStream = null
-            }
+            service?.broadcastState("recognizing")
 
-            // If streaming didn't capture it, do offline recognition
-            if (recognizedText.isEmpty()) {
-                recognizedText = recognizeOffline(samples)
+            var recognizedText = ""
+
+            if (isStreamingAsr) {
+                // 流式: 获取已累积的结果
+                if (asrStream != null) {
+                    while (onlineAsr?.isReady(asrStream!!) == true) {
+                        onlineAsr?.decode(asrStream!!)
+                    }
+                    recognizedText = onlineAsr?.getResult(asrStream!!)?.text?.trim() ?: ""
+                    asrStream?.release()
+                    asrStream = null
+                }
+            } else {
+                // 非流式: 对整段语音进行识别
+                val stream = offlineAsr?.createStream()
+                stream?.acceptWaveform(samples, sampleRate)
+                offlineAsr?.decode(stream!!)
+                recognizedText = offlineAsr?.getResult(stream!!)?.text?.trim() ?: ""
+                stream?.release()
             }
 
             Log.i(tag, "Recognized: $recognizedText")
@@ -279,58 +358,39 @@ class AssistantEngine(
                 return
             }
 
-            // Broadcast recognized text
             service?.broadcastConversation("user", recognizedText)
 
-            // 3. LLM reasoning
+            // LLM
             service?.broadcastState("thinking")
             val response = llm.generateResponse(recognizedText)
-            Log.i(tag, "LLM response: $response")
             service?.broadcastConversation("assistant", response)
 
-            // 4. TTS synthesis
+            // TTS
             service?.broadcastState("speaking")
             speak(response)
 
-            // 5. Resume listening
+            // 恢复监听
             vad?.reset()
             service?.broadcastState("listening")
 
         } catch (e: Exception) {
-            Log.e(tag, "Error processing speech segment", e)
+            Log.e(tag, "Error processing speech", e)
             service?.broadcastState("listening")
         }
     }
 
-    private fun recognizeOffline(samples: FloatArray): String {
-        // For now, return empty - streaming ASR should have captured it
-        // Could add offline recognizer here as fallback
-        return ""
-    }
-
-    /**
-     * Synthesize speech and play it
-     */
     private suspend fun speak(text: String) {
         if (text.isBlank()) return
-
         isSpeaking.set(true)
         try {
             val audio = tts?.generate(text, sid = 0, speed = 1.0f)
             if (audio != null) {
-                // Convert float [-1,1] to 16-bit PCM
                 val pcm = ShortArray(audio.samples.size)
                 for (i in audio.samples.indices) {
                     pcm[i] = (audio.samples[i] * 32767).toInt().toShort()
                 }
-
-                // Play audio
                 audioPlayer?.play(pcm, audio.sampleRate)
-
-                // Wait for playback to finish
-                while (audioPlayer?.isPlaying == true) {
-                    delay(50)
-                }
+                while (audioPlayer?.isPlaying == true) delay(50)
             }
         } finally {
             isSpeaking.set(false)

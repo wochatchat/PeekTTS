@@ -50,7 +50,7 @@
             android:textSize="18sp"
             android:layout_marginBottom="20dp" />
 
-        <!-- Model section -->
+        <!-- ============ 模型管理 ============ -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -66,6 +66,14 @@
             android:text="模型未下载"
             android:textSize="14sp"
             android:textColor="#666"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:id="@+id/tvDownloadDetail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#999"
             android:layout_marginBottom="8dp" />
 
         <ProgressBar
@@ -78,42 +86,84 @@
             android:visibility="gone"
             android:layout_marginBottom="8dp" />
 
-        <Button
-            android:id="@+id/btnDownloadModels"
+        <!-- ASR 模型选择 -->
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="下载语音模型 (~350MB)"
-            android:layout_marginBottom="20dp" />
+            android:text="语音识别模型 (ASR)"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="4dp" />
 
-        <!-- Settings -->
+        <Spinner
+            android:id="@+id/spinnerAsrModel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:id="@+id/tvAsrModelDesc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#999"
+            android:layout_marginBottom="8dp" />
+
+        <!-- TTS 模型选择 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="语音合成模型 (TTS)"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
+
+        <Spinner
+            android:id="@+id/spinnerTtsModel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:id="@+id/tvTtsModelDesc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#999"
+            android:layout_marginBottom="8dp" />
+
+        <!-- 下载按钮 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btnDownloadModels"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="下载模型" />
+
+            <Button
+                android:id="@+id/btnCancelDownload"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="取消"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- ============ 设置 ============ -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="设置"
             android:textSize="16sp"
             android:textStyle="bold"
+            android:layout_marginTop="12dp"
             android:layout_marginBottom="8dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="TTS 语音音色"
-                android:textSize="14sp" />
-
-            <Spinner
-                android:id="@+id/spinnerTtsVoice"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1" />
-        </LinearLayout>
 
         <Switch
             android:id="@+id/switchAutoStart"
@@ -122,7 +172,7 @@
             android:text="开机自动启动"
             android:layout_marginBottom="20dp" />
 
-        <!-- Conversation log -->
+        <!-- ============ 对话记录 ============ -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -139,8 +189,7 @@
             android:padding="12dp"
             android:background="#FAFAFA"
             android:minHeight="200dp"
-            android:text="对话将显示在这里...\n"
-            android:scrollbars="vertical" />
+            android:text="对话将显示在这里...\n" />
 
     </LinearLayout>
 </ScrollView>
